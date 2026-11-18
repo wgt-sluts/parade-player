@@ -176,7 +176,7 @@ ol#setList{list-style:none;margin:0;padding:6px;min-height:100%}
 .lrow img{width:34px;height:34px;border-radius:4px;object-fit:cover;background:var(--panel2)}
 .setup{padding:14px 16px;line-height:1.55}
 .setup ol{padding-left:20px}
-.setup code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:4px}
+.setup code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
 .setup .warnbox{border:1px solid var(--warn);color:var(--warn);border-radius:8px;padding:8px 10px;margin:8px 0}
 
 #toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--ink);color:var(--panel);padding:9px 14px;border-radius:10px;max-width:min(92vw,560px);opacity:0;pointer-events:none;transition:opacity .2s}
@@ -853,7 +853,7 @@ $('#boost').addEventListener('input', e => { store.boostDb = +e.target.value; to
 const SCOPES = 'streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state';
 // ".../index.html" and ".../" are the same page; use one form so a single Redirect URI in the Spotify app covers both
 const redirectUri = location.origin + location.pathname.replace(/index\.html$/i, '');
-const WEB_URL = 'https://wgt-sluts.github.io/parade-player/'; // the player's hosted web address (GitHub Pages)
+const WEB_URL = 'https://wgt-sluts.github.io/parade-player/'; // the player's hosted web address (GitHub Pages, repo wgt-sluts/parade-player)
 const spot = {
   tok: null, player: null, deviceId: null, ready: false, status: '',
   armed: null, arming: null,               // pre-loaded (held silently at 0:00) / pre-loading: { key, uri, batch }
@@ -892,7 +892,7 @@ const spot = {
     if (r.status === 401 && retry) { this.tok.exp = 0; return this.api(method, path, body, false); }
     if (r.status === 204 || r.status === 202) return null;
     const text = await r.text(); let j = null; try { j = text ? JSON.parse(text) : null; } catch (e) {}
-    if (!r.ok) throw new Error(j?.error?.message || ('HTTP ' + r.status));
+    if (!r.ok) { const err = new Error(j?.error?.message || ('HTTP ' + r.status)); err.status = r.status; throw err; }
     return j;
   },
   logout() { this.tok = null; localStorage.removeItem(LS_TOKEN); try { this.player?.disconnect(); } catch (e) {} this.player = null; this.ready = false; this.deviceId = null; this.status = ''; renderAll(); },
@@ -900,7 +900,15 @@ const spot = {
     if (!this.tok || !this.usable()) { renderAll(); return; }
     this.status = 'Connecting…'; renderHeader();
     // Spotify stopped sending "product" to development-mode apps in 2026, so only warn when it is actually reported
-    this.api('GET', '/me').then(me => { this.product = me.product || ''; if (me.product && me.product !== 'premium') toast('Spotify playback needs a Premium account (this account is "' + me.product + '")', 7000); renderHeader(); }).catch(e => { this.status = 'Error: ' + e.message; renderHeader(); });
+    this.api('GET', '/me').then(me => { this.product = me.product || ''; if (me.product && me.product !== 'premium') toast('Spotify playback needs a Premium account (this account is "' + me.product + '")', 7000); renderHeader(); }).catch(e => {
+      if (e.status === 403) {                // signed in, but this Spotify account isn't on the app's list of allowed users
+        this.status = 'Account not allowed';
+        toast(store.spotifyClientId === DEFAULT_SPOTIFY_CLIENT_ID
+          ? 'Spotify: this account isn\'t on the Parade Player app\'s list (max 5 people). Ask the owner to add your Spotify email, or click Disconnect and use your own free Spotify app.'
+          : 'Spotify: this account isn\'t allowed to use that Spotify app. Sign in with the account that created it, or add this account under User Management in the app\'s dashboard.', 12000);
+      } else this.status = 'Error: ' + e.message;
+      renderHeader(); renderLib();
+    });
     window.onSpotifyWebPlaybackSDKReady = () => {
       const p = this.player = new Spotify.Player({ name: 'Parade Player', getOAuthToken: cb => this.token().then(cb, () => {}), volume: 0 });
       p.addListener('ready', ({ device_id }) => { this.deviceId = device_id; this.ready = true; this.status = ''; renderAll(); this.armCued(); });
@@ -1398,7 +1406,12 @@ libScroll.addEventListener('click', async e => {
   else if (act === 'sadd') { const r = spResults[+b.dataset.idx]; if (!r) return; if (r.kind === 'album') { b.disabled = true; try { addSpotify(await spotifyTracksFor('album', r.id)); } catch (err) { toast('Spotify: ' + err.message); } b.disabled = false; } else addSpotify([r.item]); }
   else if (act === 'newMix') createMix();
   else if (act === 'pickFolder') folderButton();
-  else if (act === 'spConnect') { store.spotifyClientId = $('#spCid')?.value.trim() || DEFAULT_SPOTIFY_CLIENT_ID; save(); spot.login(); }
+  else if (act === 'spConnect') { store.spotifyClientId = DEFAULT_SPOTIFY_CLIENT_ID; save(); spot.login(); }
+  else if (act === 'spConnectOwn') {
+    const cid = ($('#spCid')?.value || '').trim();
+    if (!/^[0-9a-f]{32}$/i.test(cid)) { toast('Paste the Client ID from your Spotify app first (32 letters and numbers)'); return; }
+    store.spotifyClientId = cid; save(); spot.login();
+  }
   else if (act === 'spLogout') spot.logout();
   else if (act === 'copyUri') { navigator.clipboard?.writeText(redirectUri).then(() => toast('Copied')); }
   else if (act === 'spGo') spotifySearch($('#libSearch').value);
@@ -1572,21 +1585,28 @@ function renderLib() {
     return;
   }
   if (!spot.tok) {
+    const own = store.spotifyClientId && store.spotifyClientId !== DEFAULT_SPOTIFY_CLIENT_ID ? store.spotifyClientId : '';
     libScroll.innerHTML = `<div class="setup">
-      <b>Connect Spotify</b> – needs a <b>Spotify Premium</b> account. Click Connect, sign in if asked, and press <b>Agree</b>.<br><br>
-      <button data-act="spConnect">Connect Spotify</button>
-      <details style="margin-top:14px"><summary class="muted">Using a different Spotify developer app?</summary>
-      <ol>
-        <li>Open <code>developer.spotify.com/dashboard</code>, log in, and click <b>Create app</b>.</li>
-        <li>Any name and description. Under <b>Redirect URIs</b> add exactly:<br><code>${esc(redirectUri)}</code> <button data-act="copyUri">Copy</button></li>
-        <li>Tick <b>Web API</b> and <b>Web Playback SDK</b>, agree, and Save.</li>
-        <li>Open the app's <b>Settings</b>, copy the <b>Client ID</b> and paste it here:</li>
-      </ol>
-      <input id="spCid" placeholder="Client ID" style="width:100%" value="${esc(store.spotifyClientId)}"> then click Connect Spotify above.</details>
-      <p class="muted">Spotify needs internet. Songs from your music folder don't, and start instantly. Spotify songs stream, so the player pre-loads the next Spotify song silently to make it start fast.</p></div>`;
+      <b>Connect your Spotify</b> – you play from your own Spotify account, which needs <b>Spotify Premium</b>. Choose one:
+      <div class="warnbox" style="color:inherit;border-color:var(--line)">
+        <b>1. Use the Parade Player app</b> – quickest, but Spotify only lets <b>5 people</b> use it, and the app's owner has to add your Spotify email first.<br>
+        <button data-act="spConnect" style="margin-top:6px">Connect Spotify</button>
+      </div>
+      <div class="warnbox" style="color:inherit;border-color:var(--line)">
+        <b>2. Use your own free Spotify app</b> – for everyone else (no limit, about 2 minutes, one time only):
+        <ol>
+          <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>, log in with your Spotify account, and click <b>Create app</b>.</li>
+          <li>Any name and description. Under <b>Redirect URIs</b> add exactly:<br><code>${esc(redirectUri)}</code> <button data-act="copyUri">Copy</button></li>
+          <li>Tick <b>Web API</b> and <b>Web Playback SDK</b>, agree to the terms, and click <b>Save</b>.</li>
+          <li>On the app's page, copy the <b>Client ID</b> and paste it here:</li>
+        </ol>
+        <input id="spCid" placeholder="Paste your Client ID" style="width:100%" value="${esc(own)}">
+        <button data-act="spConnectOwn" style="margin-top:6px">Connect with my app</button>
+      </div>
+      <p class="muted">The player remembers which app you used on this computer. Spotify needs internet. Songs from your music folder don't, and start instantly. Spotify songs stream, so the player pre-loads the next Spotify song silently to make it start fast.</p></div>`;
     return;
   }
-  let html = `<div class="setup" style="padding-bottom:4px"><span class="muted">${spot.ready ? 'Connected' : 'Connecting…'} ${spot.product && spot.product !== 'premium' ? '· <b style="color:var(--bad)">needs Premium</b>' : ''}</span> <button data-act="spGo">Search</button> <button data-act="spLogout">Disconnect</button></div>`;
+  let html = `<div class="setup" style="padding-bottom:4px"><span class="muted">${spot.ready ? 'Connected' : esc(spot.status || 'Connecting…')} · ${store.spotifyClientId === DEFAULT_SPOTIFY_CLIENT_ID ? 'Parade Player app' : 'your own Spotify app'} ${spot.product && spot.product !== 'premium' ? '· <b style="color:var(--bad)">needs Premium</b>' : ''}</span> <button data-act="spGo">Search</button> <button data-act="spLogout">Disconnect</button></div>`;
   const mixes = curSet().items.filter(x => x.kind === 'spmix'), tm = targetMix();
   html += `<div class="addto"><span class="muted">Add songs to:</span><select id="spTarget" title="Where the + buttons put Spotify songs">
       <option value="">The set (one row per song)</option>${mixes.map(m => `<option value="${esc(m.id)}"${tm === m ? ' selected' : ''}>♫ ${esc(itemName(m))} (${m.tracks.length})</option>`).join('')}
